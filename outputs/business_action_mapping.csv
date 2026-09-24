@@ -1,5 +1,5 @@
-segment,business_focus,recommended_actions
-High Engagement Users,Retention and value expansion,"Loyalty programs, premium offers, early access and advocacy programs"
-Moderate Engagement Users,Engagement growth,"Personalized recommendations, feature education and engagement campaigns"
-Low Engagement / At-Risk Users,Churn prevention,"Retention offers, reminders, re-engagement campaigns and onboarding support"
-Occasional Users,Re-engagement,"Targeted reminders, relevant content and campaigns designed to increase usage"
+segment_name,customer_characteristics,business_value,recommended_action
+High Users,Highly active users with strong engagement and frequent interaction with the application.,"Important users for loyalty, continued engagement, and value expansion.","Use loyalty programs, premium offers, exclusive features, and personalized recommendations to maintain engagement and increase value."
+Moderate Users,Users with consistent but moderate activity and balanced engagement.,Users with an opportunity for increased engagement and progression toward higher-value behavior.,"Use personalized recommendations, feature discovery campaigns, targeted incentives, and engagement journeys."
+Low Users,Users with low activity and engagement and comparatively weaker retention health.,A key retention opportunity where timely intervention may reduce disengagement and potential churn.,"Use re-engagement campaigns, personalized notifications, win-back offers, and targeted retention journeys."
+Occasional Users,Users who interact with the application irregularly or infrequently.,An opportunity to increase usage frequency and encourage more consistent application engagement.,"Use relevant reminders, personalized content, targeted promotions, and recommendations designed to increase visit frequency."

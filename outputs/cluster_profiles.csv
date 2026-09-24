@@ -1,5 +1,0 @@
-cluster,sessions_per_week,avg_session_duration_min,daily_active_minutes,feature_clicks_per_session,notifications_opened_per_week,in_app_search_count,pages_viewed_per_session,crash_events_last_30_days,support_tickets_raised,days_since_last_login,ads_clicked_last_30_days,content_downloads,social_shares,churn_risk_score,engagement_score
-0,7.94,13.08,45.21,12.05,4.97,3.99,13.46,1.3,0.04,22.02,6.02,3.01,1.99,0.58,65.04
-1,7.97,13.0,45.49,12.04,5.03,3.98,13.42,0.0,0.0,21.76,6.01,3.01,1.98,0.74,65.08
-2,8.02,13.21,45.11,11.96,5.01,4.0,13.46,0.3,1.11,22.02,6.01,2.99,2.01,0.5,64.84
-3,8.06,13.32,44.85,11.99,4.98,4.02,13.53,0.15,0.0,22.33,5.95,2.99,2.02,0.22,64.79

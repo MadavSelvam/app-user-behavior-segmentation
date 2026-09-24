@@ -1,607 +1,736 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import matplotlib.pyplot as plt
 from pathlib import Path
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------
-# PAGE CONFIGURATION
-# ---------------------------------------------------------
+# ============================================================
+# App configuration
+# ============================================================
 
 st.set_page_config(
     page_title="App User Behavior Segmentation",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
-# ---------------------------------------------------------
-# PATHS
-# ---------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
-BASE_DIR = Path(__file__).resolve().parent
-
-DATA_PATH = BASE_DIR / "data" / "app_user_behavior_dataset.csv"
-MODEL_DIR = BASE_DIR / "models"
-OUTPUT_DIR = BASE_DIR / "outputs"
-
-# ---------------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------------
-
-@st.cache_data
-def load_data():
-    return pd.read_csv(DATA_PATH)
+REQUIRED_FILES = {
+    "segmented_users": OUTPUT_DIR / "segmented_users.csv",
+    "cluster_performance": OUTPUT_DIR / "cluster_performance.csv",
+    "segment_profile": OUTPUT_DIR / "final_segment_profile.csv",
+    "distribution": OUTPUT_DIR / "segment_distribution.csv",
+    "business_actions": OUTPUT_DIR / "business_action_mapping.csv",
+    "summary": OUTPUT_DIR / "final_business_summary.csv",
+    "pca": OUTPUT_DIR / "pca_coordinates.csv",
+}
 
 
-@st.cache_resource
-def load_models():
-    scaler = joblib.load(MODEL_DIR / "scaler.pkl")
-    pca = joblib.load(MODEL_DIR / "pca.pkl")
-    kmeans = joblib.load(MODEL_DIR / "kmeans_model.pkl")
-
-    with open(MODEL_DIR / "feature_names.txt", "r", encoding="utf-8") as file:
-        features = [line.strip() for line in file.readlines()]
-
-    return scaler, pca, kmeans, features
-
+# ============================================================
+# Helpers
+# ============================================================
 
 @st.cache_data
-def load_outputs():
-    cluster_profiles = pd.read_csv(
-        OUTPUT_DIR / "cluster_profiles.csv",
-        index_col=0
+def load_csv(path):
+    return pd.read_csv(path)
+
+
+def require_file(path, label):
+    if not path.exists():
+        st.error(
+            f"Required output is missing: `{path}`\n\n"
+            f"Run the clean notebook completely before launching Streamlit."
+        )
+        st.stop()
+
+
+def find_column(df, candidates):
+    normalized = {
+        str(c).strip().lower().replace(" ", "_"): c
+        for c in df.columns
+    }
+
+    for candidate in candidates:
+        key = candidate.strip().lower().replace(" ", "_")
+        if key in normalized:
+            return normalized[key]
+
+    return None
+
+
+def format_number(value):
+    if pd.isna(value):
+        return "N/A"
+    if isinstance(value, (int, float)):
+        return f"{value:,.2f}"
+    return str(value)
+
+
+# ============================================================
+# Load authoritative outputs
+# ============================================================
+
+for label, path in REQUIRED_FILES.items():
+    require_file(path, label)
+
+users = load_csv(REQUIRED_FILES["segmented_users"])
+performance = load_csv(REQUIRED_FILES["cluster_performance"])
+profile = load_csv(REQUIRED_FILES["segment_profile"])
+distribution = load_csv(REQUIRED_FILES["distribution"])
+actions = load_csv(REQUIRED_FILES["business_actions"])
+summary = load_csv(REQUIRED_FILES["summary"])
+pca = load_csv(REQUIRED_FILES["pca"])
+
+
+# ============================================================
+# Establish ONE authoritative cluster -> segment mapping
+# ============================================================
+
+cluster_col = find_column(performance, ["cluster"])
+segment_col = find_column(performance, ["segment_name"])
+
+if cluster_col is None or segment_col is None:
+    st.error(
+        "cluster_performance.csv must contain both `cluster` and "
+        "`segment_name` columns."
+    )
+    st.stop()
+
+mapping_df = performance[[cluster_col, segment_col]].copy()
+mapping_df.columns = ["cluster", "segment_name"]
+
+mapping_df["cluster"] = pd.to_numeric(
+    mapping_df["cluster"], errors="coerce"
+)
+
+mapping_df = mapping_df.dropna(subset=["cluster", "segment_name"])
+mapping_df["cluster"] = mapping_df["cluster"].astype(int)
+
+if mapping_df["cluster"].duplicated().any():
+    st.error("Duplicate cluster IDs found in cluster_performance.csv.")
+    st.stop()
+
+if mapping_df["segment_name"].duplicated().any():
+    st.error("Duplicate segment names found in cluster_performance.csv.")
+    st.stop()
+
+EXPECTED_SEGMENTS = {
+    "High Users",
+    "Moderate Users",
+    "Low Users",
+    "Occasional Users",
+}
+
+if set(mapping_df["segment_name"]) != EXPECTED_SEGMENTS:
+    st.warning(
+        "The notebook output does not currently contain exactly the expected "
+        "four business segment names."
     )
 
-    segment_profiles = pd.read_csv(
-        OUTPUT_DIR / "segment_profiles.csv",
-        index_col=0
+CLUSTER_TO_SEGMENT = dict(
+    zip(mapping_df["cluster"], mapping_df["segment_name"])
+)
+
+SEGMENT_TO_CLUSTER = {
+    segment: cluster
+    for cluster, segment in CLUSTER_TO_SEGMENT.items()
+}
+
+SEGMENT_ORDER = [
+    "High Users",
+    "Moderate Users",
+    "Low Users",
+    "Occasional Users",
+]
+
+
+# ============================================================
+# Normalize customer data using authoritative mapping
+# ============================================================
+
+user_cluster_col = find_column(users, ["cluster"])
+user_segment_col = find_column(users, ["segment_name"])
+
+if user_cluster_col is None:
+    st.error("segmented_users.csv is missing the cluster column.")
+    st.stop()
+
+users[user_cluster_col] = pd.to_numeric(
+    users[user_cluster_col], errors="coerce"
+)
+
+# IMPORTANT:
+# Ignore any stale segment_name already present in segmented_users.csv.
+# Recreate it from the authoritative cluster_performance mapping.
+users["segment_name"] = users[user_cluster_col].map(CLUSTER_TO_SEGMENT)
+
+if users["segment_name"].isna().any():
+    st.error(
+        "Some users have a cluster ID that does not exist in "
+        "cluster_performance.csv."
     )
-
-    user_assignments = pd.read_csv(
-        OUTPUT_DIR / "user_cluster_assignments.csv"
-    )
-
-    segment_sizes = pd.read_csv(
-        OUTPUT_DIR / "segment_sizes.csv"
-    )
-
-    business_actions = pd.read_csv(
-        OUTPUT_DIR / "business_action_mapping.csv"
-    )
-
-    return (
-        cluster_profiles,
-        segment_profiles,
-        user_assignments,
-        segment_sizes,
-        business_actions
-    )
-
-
-# ---------------------------------------------------------
-# LOAD EVERYTHING
-# ---------------------------------------------------------
-
-try:
-    df = load_data()
-
-    scaler, pca, kmeans, behavior_features = load_models()
-
-    (
-        cluster_profiles,
-        segment_profiles,
-        user_assignments,
-        segment_sizes,
-        business_actions
-    ) = load_outputs()
-
-    # Merge the ML cluster and segment results with the original dataset
-    df = df.merge(
-        user_assignments[["user_id", "cluster", "segment"]],
-        on="user_id",
-        how="left"
-    )
-
-except Exception as e:
-    st.error("Unable to load the project files.")
-    st.exception(e)
     st.stop()
 
 
-# ---------------------------------------------------------
-# TITLE
-# ---------------------------------------------------------
+# ============================================================
+# Normalize profile
+# ============================================================
+
+profile_cluster_col = find_column(profile, ["cluster"])
+profile_segment_col = find_column(profile, ["segment_name"])
+
+if profile_cluster_col is not None:
+    profile[profile_cluster_col] = pd.to_numeric(
+        profile[profile_cluster_col], errors="coerce"
+    )
+
+if profile_cluster_col is not None:
+    # Ignore stale profile segment labels and recreate them.
+    profile["segment_name"] = profile[profile_cluster_col].map(
+        CLUSTER_TO_SEGMENT
+    )
+
+
+# ============================================================
+# Normalize distribution
+# ============================================================
+
+distribution_segment_col = find_column(
+    distribution, ["segment_name"]
+)
+
+if distribution_segment_col is not None:
+    distribution["segment_name"] = distribution[
+        distribution_segment_col
+    ]
+
+
+# ============================================================
+# Normalize business actions
+# ============================================================
+
+action_segment_col = find_column(actions, ["segment_name"])
+
+if action_segment_col is None:
+    st.error(
+        "business_action_mapping.csv is missing segment_name."
+    )
+    st.stop()
+
+actions["segment_name"] = actions[action_segment_col]
+
+
+# ============================================================
+# Header
+# ============================================================
 
 st.title("📊 App User Behavior Segmentation")
-
-st.markdown(
-    """
-    ### Unsupervised Machine Learning Dashboard
-
-    This application segments app users based on their behavioral
-    and engagement patterns using **K-Means clustering**.
-    """
+st.caption(
+    "K-Means based behavioral segmentation with customer-level profiling "
+    "and business action mapping."
 )
 
-st.divider()
+st.info(
+    "Segment names are dynamically derived from cluster performance in "
+    "`cluster_performance.csv`. Cluster numbers are technical IDs and are "
+    "not used as business segment names."
+)
 
 
-# ---------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------
+# ============================================================
+# Sidebar
+# ============================================================
 
-st.sidebar.title("Navigation")
+st.sidebar.header("Navigation")
 
 page = st.sidebar.radio(
-    "Select a section",
+    "Select a page",
     [
-        "Overview",
+        "Dashboard",
         "Segment Analysis",
-        "User Search",
-        "At-Risk Users",
-        "PCA Visualization"
-    ]
+        "Customer Explorer",
+        "Customer Targeting",
+        "Model Insights",
+    ],
 )
 
+st.sidebar.divider()
+st.sidebar.subheader("Current Mapping")
 
-# ---------------------------------------------------------
-# COMMON METRICS
-# ---------------------------------------------------------
-
-total_users = len(df)
-total_segments = df["segment"].nunique()
-
-average_engagement = df["engagement_score"].mean()
-average_churn = df["churn_risk_score"].mean()
-
-
-# ---------------------------------------------------------
-# OVERVIEW
-# ---------------------------------------------------------
-
-if page == "Overview":
-
-    st.header("📌 Overview")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Total Users",
-        f"{total_users:,}"
+for cluster_id in sorted(CLUSTER_TO_SEGMENT):
+    st.sidebar.write(
+        f"Cluster {cluster_id} → {CLUSTER_TO_SEGMENT[cluster_id]}"
     )
 
-    col2.metric(
-        "User Segments",
-        total_segments
+
+# ============================================================
+# Dashboard
+# ============================================================
+
+if page == "Dashboard":
+
+    st.header("Dashboard Overview")
+
+    total_users = len(users)
+    total_segments = users["segment_name"].nunique()
+
+    high_count = int(
+        (users["segment_name"] == "High Users").sum()
     )
 
-    col3.metric(
-        "Avg. Engagement Score",
-        f"{average_engagement:.2f}"
+    low_count = int(
+        (users["segment_name"] == "Low Users").sum()
     )
 
-    col4.metric(
-        "Avg. Churn Risk",
-        f"{average_churn:.2f}"
-    )
+    c1, c2, c3, c4 = st.columns(4)
 
-    st.divider()
+    c1.metric("Total Users", f"{total_users:,}")
+    c2.metric("Segments", total_segments)
+    c3.metric("High Users", f"{high_count:,}")
+    c4.metric("Low Users", f"{low_count:,}")
 
-    st.subheader("User Segment Distribution")
+    st.subheader("Segment Distribution")
 
-    distribution = (
-        df["segment"]
+    dist = (
+        users["segment_name"]
         .value_counts()
-        .reset_index()
+        .reindex(SEGMENT_ORDER)
+        .fillna(0)
+        .astype(int)
     )
 
-    distribution.columns = [
-        "Segment",
-        "Users"
-    ]
-
-    st.bar_chart(
-        distribution.set_index("Segment")
-    )
-
-    st.subheader("Segment Summary")
-
-    summary = (
-        df.groupby("segment")
-        .agg(
-            Users=("user_id", "count"),
-            Avg_Sessions=("sessions_per_week", "mean"),
-            Avg_Session_Duration=(
-                "avg_session_duration_min",
-                "mean"
-            ),
-            Avg_Engagement=(
-                "engagement_score",
-                "mean"
-            ),
-            Avg_Churn_Risk=(
-                "churn_risk_score",
-                "mean"
-            )
-        )
-        .round(2)
-        .reset_index()
-    )
+    distribution_display = pd.DataFrame({
+        "Segment": dist.index,
+        "Users": dist.values,
+        "Percentage": (
+            dist.values / total_users * 100
+        ).round(2),
+    })
 
     st.dataframe(
-        summary,
+        distribution_display,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+    )
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.bar(
+        distribution_display["Segment"],
+        distribution_display["Users"],
+    )
+    ax.set_title("Users by Business Segment")
+    ax.set_ylabel("Number of Users")
+    ax.tick_params(axis="x", rotation=20)
+    ax.grid(axis="y", alpha=0.2)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.subheader("Dynamic Cluster Mapping")
+
+    st.dataframe(
+        mapping_df.sort_values("cluster"),
+        use_container_width=True,
+        hide_index=True,
     )
 
 
-# ---------------------------------------------------------
-# SEGMENT ANALYSIS
-# ---------------------------------------------------------
+# ============================================================
+# Segment Analysis
+# ============================================================
 
 elif page == "Segment Analysis":
 
-    st.header("🔎 Segment Analysis")
-
-    segments = sorted(
-        df["segment"].dropna().unique()
+    st.header("Segment Analysis")
+    st.write(
+        "Understand the behavioral characteristics of each business segment."
     )
 
     selected_segment = st.selectbox(
-        "Select a user segment",
-        segments
+        "Select Segment",
+        SEGMENT_ORDER,
     )
 
-    segment_data = df[
-        df["segment"] == selected_segment
+    selected_cluster = SEGMENT_TO_CLUSTER.get(selected_segment)
+
+    st.subheader(selected_segment)
+
+    st.write(
+        f"Technical K-Means cluster: **Cluster {selected_cluster}**"
+    )
+
+    # Always retrieve performance by cluster from the authoritative file.
+    perf_row = performance[
+        performance[cluster_col] == selected_cluster
     ]
 
-    st.subheader(
-        f"{selected_segment}"
+    if perf_row.empty:
+        st.error("No performance record exists for this cluster.")
+        st.stop()
+
+    perf = perf_row.iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    activity_col = find_column(
+        performance, ["activity_score"]
+    )
+    value_col = find_column(
+        performance, ["value_score"]
+    )
+    retention_col = find_column(
+        performance, ["retention_score"]
+    )
+    overall_col = find_column(
+        performance, ["overall_behavior_score"]
     )
 
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Users",
-        f"{len(segment_data):,}"
+    c1.metric(
+        "Activity Score",
+        format_number(perf[activity_col])
+        if activity_col else "N/A",
+    )
+    c2.metric(
+        "Value Score",
+        format_number(perf[value_col])
+        if value_col else "N/A",
+    )
+    c3.metric(
+        "Retention Score",
+        format_number(perf[retention_col])
+        if retention_col else "N/A",
+    )
+    c4.metric(
+        "Overall Behavior",
+        format_number(perf[overall_col])
+        if overall_col else "N/A",
     )
 
-    col2.metric(
-        "Avg. Sessions / Week",
-        f"{segment_data['sessions_per_week'].mean():.2f}"
-    )
+    selected_users = users[
+        users["segment_name"] == selected_segment
+    ]
 
-    col3.metric(
-        "Avg. Engagement",
-        f"{segment_data['engagement_score'].mean():.2f}"
-    )
+    st.subheader("Customer Count")
 
-    col4.metric(
-        "Avg. Churn Risk",
-        f"{segment_data['churn_risk_score'].mean():.2f}"
+    st.metric(
+        "Users in Segment",
+        f"{len(selected_users):,}",
     )
-
-    st.divider()
 
     st.subheader("Behavioral Profile")
 
-    profile_metrics = pd.DataFrame({
-        "Metric": [
-            "Average Session Duration",
-            "Daily Active Minutes",
-            "Feature Clicks / Session",
-            "Notifications Opened / Week",
-            "Pages Viewed / Session",
-            "Content Downloads",
-            "Social Shares",
-            "Days Since Last Login"
-        ],
-        "Average": [
-            segment_data["avg_session_duration_min"].mean(),
-            segment_data["daily_active_minutes"].mean(),
-            segment_data["feature_clicks_per_session"].mean(),
-            segment_data["notifications_opened_per_week"].mean(),
-            segment_data["pages_viewed_per_session"].mean(),
-            segment_data["content_downloads"].mean(),
-            segment_data["social_shares"].mean(),
-            segment_data["days_since_last_login"].mean()
+    # Select the row from profile using cluster, not segment text.
+    profile_row = pd.DataFrame()
+
+    if profile_cluster_col is not None:
+        profile_row = profile[
+            profile[profile_cluster_col] == selected_cluster
         ]
-    })
 
-    profile_metrics["Average"] = (
-        profile_metrics["Average"].round(2)
-    )
-
-    st.dataframe(
-        profile_metrics,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.divider()
-
-    action = business_actions[
-        business_actions["segment"] == selected_segment
-    ]
-
-    if not action.empty:
-
-        st.subheader("💡 Recommended Business Action")
-
-        st.info(
-            action.iloc[0]["recommended_actions"]
-        )
-
-
-# ---------------------------------------------------------
-# USER SEARCH
-# ---------------------------------------------------------
-
-elif page == "User Search":
-
-    st.header("👤 User Search")
-
-    user_ids = df["user_id"].astype(str).tolist()
-
-    selected_user = st.selectbox(
-        "Select User ID",
-        user_ids
-    )
-
-    user_data = df[
-        df["user_id"].astype(str) == selected_user
-    ]
-
-    if not user_data.empty:
-
-        user = user_data.iloc[0]
-
-        st.subheader("User Profile")
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        col1.metric(
-            "Segment",
-            user["segment"]
-        )
-
-        col2.metric(
-            "Engagement Score",
-            f"{user['engagement_score']:.2f}"
-        )
-
-        col3.metric(
-            "Churn Risk",
-            f"{user['churn_risk_score']:.2f}"
-        )
-
-        col4.metric(
-            "Sessions / Week",
-            f"{user['sessions_per_week']:.2f}"
-        )
-
-        st.divider()
-
-        st.subheader("Behavioral Details")
-
-        user_metrics = pd.DataFrame({
-            "Metric": [
-                "Average Session Duration",
-                "Daily Active Minutes",
-                "Feature Clicks / Session",
-                "Notifications Opened / Week",
-                "In-App Searches",
-                "Pages Viewed / Session",
-                "Crash Events",
-                "Support Tickets",
-                "Days Since Last Login",
-                "Ads Clicked",
-                "Content Downloads",
-                "Social Shares"
+    if not profile_row.empty:
+        profile_display = profile_row.drop(
+            columns=[
+                c for c in [
+                    profile_cluster_col,
+                ]
+                if c is not None and c in profile_row.columns
             ],
-            "Value": [
-                user["avg_session_duration_min"],
-                user["daily_active_minutes"],
-                user["feature_clicks_per_session"],
-                user["notifications_opened_per_week"],
-                user["in_app_search_count"],
-                user["pages_viewed_per_session"],
-                user["crash_events_last_30_days"],
-                user["support_tickets_raised"],
-                user["days_since_last_login"],
-                user["ads_clicked_last_30_days"],
-                user["content_downloads"],
-                user["social_shares"]
-            ]
-        })
+            errors="ignore",
+        )
+
+        profile_display = profile_display.drop(
+            columns=["segment_name"],
+            errors="ignore",
+        )
 
         st.dataframe(
-            user_metrics,
+            profile_display.T.rename(columns={profile_display.index[0]: "Value"})
+            if len(profile_display) == 1
+            else profile_display,
             use_container_width=True,
-            hide_index=True
         )
+    else:
+        st.warning("No profile record found for this cluster.")
 
-        action = business_actions[
-            business_actions["segment"] == user["segment"]
-        ]
+    st.subheader("Business Interpretation")
 
-        if not action.empty:
+    action_row = actions[
+        actions["segment_name"] == selected_segment
+    ]
 
-            st.subheader("🎯 Recommended Action")
+    if not action_row.empty:
+        action = action_row.iloc[0]
 
-            st.success(
-                action.iloc[0]["recommended_actions"]
-            )
+        for column in action.index:
+            if column == "segment_name":
+                continue
+
+            label = str(column).replace("_", " ").title()
+
+            st.markdown(f"**{label}**")
+            st.write(action[column])
+    else:
+        st.warning("No business action mapping found.")
 
 
-# ---------------------------------------------------------
-# AT-RISK USERS
-# ---------------------------------------------------------
+# ============================================================
+# Customer Explorer
+# ============================================================
 
-elif page == "At-Risk Users":
+elif page == "Customer Explorer":
 
-    st.header("⚠️ At-Risk Users")
+    st.header("Customer Explorer")
+    st.write(
+        "Identify the exact users belonging to each behavioral segment."
+    )
 
-    at_risk_segment = "Low Engagement / At-Risk Users"
+    selected_segment = st.selectbox(
+        "Select Segment",
+        SEGMENT_ORDER,
+    )
 
-    at_risk_users = df[
-        df["segment"] == at_risk_segment
+    selected_users = users[
+        users["segment_name"] == selected_segment
     ].copy()
 
-    if at_risk_users.empty:
+    st.metric(
+        "Users in Segment",
+        f"{len(selected_users):,}",
+    )
 
-        st.warning(
-            "No users were assigned to the At-Risk segment."
-        )
+    search_text = st.text_input(
+        "Search by User ID",
+        "",
+    )
 
-    else:
-
-        col1, col2, col3 = st.columns(3)
-
-        col1.metric(
-            "At-Risk Users",
-            f"{len(at_risk_users):,}"
-        )
-
-        col2.metric(
-            "Avg. Engagement",
-            f"{at_risk_users['engagement_score'].mean():.2f}"
-        )
-
-        col3.metric(
-            "Avg. Churn Risk",
-            f"{at_risk_users['churn_risk_score'].mean():.2f}"
-        )
-
-        st.divider()
-
-        display_columns = [
+    user_id_col = find_column(
+        selected_users,
+        [
             "user_id",
-            "sessions_per_week",
-            "avg_session_duration_min",
-            "daily_active_minutes",
-            "days_since_last_login",
-            "engagement_score",
-            "churn_risk_score"
-        ]
-
-        display_data = at_risk_users[
-            display_columns
-        ].sort_values(
-            "churn_risk_score",
-            ascending=False
-        )
-
-        st.dataframe(
-            display_data,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.info(
-            "Recommended strategy: prioritize these users "
-            "for retention offers, reminders and re-engagement campaigns."
-        )
-
-
-# ---------------------------------------------------------
-# PCA VISUALIZATION
-# ---------------------------------------------------------
-
-elif page == "PCA Visualization":
-
-    st.header("📈 PCA Cluster Visualization")
-
-    st.write(
-        """
-        PCA reduces the behavioral feature space to two dimensions.
-        Each point represents a user and the color represents their
-        assigned behavioral segment.
-        """
-    )
-
-    # Transform the original feature data
-    X_app = df[behavior_features].copy()
-
-    # Handle any missing values consistently
-    X_app = X_app.fillna(
-        X_app.median(numeric_only=True)
-    )
-
-    X_scaled_app = scaler.transform(X_app)
-
-    X_pca_app = pca.transform(X_scaled_app)
-
-    pca_display = pd.DataFrame({
-        "PC1": X_pca_app[:, 0],
-        "PC2": X_pca_app[:, 1],
-        "Segment": df["segment"].values
-    })
-
-    fig, ax = plt.subplots(
-        figsize=(10, 7)
-    )
-
-    for segment in pca_display["Segment"].unique():
-
-        subset = pca_display[
-            pca_display["Segment"] == segment
-        ]
-
-        ax.scatter(
-            subset["PC1"],
-            subset["PC2"],
-            alpha=0.35,
-            s=15,
-            label=segment
-        )
-
-    ax.set_title(
-        "User Segmentation Using PCA"
-    )
-
-    ax.set_xlabel("Principal Component 1")
-    ax.set_ylabel("Principal Component 2")
-
-    ax.legend()
-
-    st.pyplot(fig)
-
-    st.divider()
-
-    st.subheader("PCA Explained Variance")
-
-    variance_data = pd.DataFrame({
-        "Component": [
-            "PC1",
-            "PC2"
+            "userid",
+            "user id",
+            "customer_id",
+            "customerid",
+            "customer id",
         ],
-        "Explained Variance": [
-            pca.explained_variance_ratio_[0],
-            pca.explained_variance_ratio_[1]
-        ]
-    })
+    )
 
-    variance_data["Explained Variance"] = (
-        variance_data["Explained Variance"] * 100
-    ).round(2)
+    if search_text and user_id_col:
+        selected_users = selected_users[
+            selected_users[user_id_col]
+            .astype(str)
+            .str.contains(
+                search_text,
+                case=False,
+                na=False,
+            )
+        ]
 
     st.dataframe(
-        variance_data,
+        selected_users,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
 
-# ---------------------------------------------------------
-# FOOTER
-# ---------------------------------------------------------
+# ============================================================
+# Customer Targeting
+# ============================================================
 
-st.sidebar.divider()
+elif page == "Customer Targeting":
 
-st.sidebar.caption(
-    "App User Behavior Segmentation | "
-    "Unsupervised Machine Learning"
-)
+    st.header("Customer Targeting")
+    st.write(
+        "Translate segment behavior into customer-level business actions."
+    )
+
+    selected_segment = st.selectbox(
+        "Select Target Segment",
+        SEGMENT_ORDER,
+    )
+
+    target_users = users[
+        users["segment_name"] == selected_segment
+    ].copy()
+
+    action_row = actions[
+        actions["segment_name"] == selected_segment
+    ]
+
+    st.subheader("Target Audience")
+
+    st.metric(
+        "Customers Available for Targeting",
+        f"{len(target_users):,}",
+    )
+
+    if not action_row.empty:
+        action = action_row.iloc[0]
+
+        characteristics_col = find_column(
+            action_row,
+            [
+                "customer_characteristics",
+                "characteristics",
+                "customer_profile",
+            ],
+        )
+
+        value_col = find_column(
+            action_row,
+            [
+                "business_value",
+                "value",
+            ],
+        )
+
+        recommendation_col = find_column(
+            action_row,
+            [
+                "recommended_action",
+                "recommended_actions",
+                "action",
+            ],
+        )
+
+        if characteristics_col:
+            st.subheader("Customer Characteristics")
+            st.write(action[characteristics_col])
+
+        if value_col:
+            st.subheader("Business Value")
+            st.write(action[value_col])
+
+        if recommendation_col:
+            st.subheader("Recommended Action")
+            st.write(action[recommendation_col])
+
+    st.subheader("Target Customers")
+
+    user_id_col = find_column(
+        target_users,
+        [
+            "user_id",
+            "userid",
+            "user id",
+            "customer_id",
+            "customerid",
+            "customer id",
+        ],
+    )
+
+    if user_id_col:
+        st.dataframe(
+            target_users[[user_id_col, "cluster", "segment_name"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.dataframe(
+            target_users,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ============================================================
+# Model Insights
+# ============================================================
+
+elif page == "Model Insights":
+
+    st.header("Model Insights")
+
+    st.subheader("Cluster Performance")
+
+    display_performance = performance.copy()
+
+    st.dataframe(
+        display_performance.sort_values("cluster"),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("PCA Visualization")
+
+    pca_x = find_column(
+        pca,
+        ["pca_1", "PC1", "principal_component_1"],
+    )
+    pca_y = find_column(
+        pca,
+        ["pca_2", "PC2", "principal_component_2"],
+    )
+    pca_segment = find_column(
+        pca,
+        ["segment_name"],
+    )
+
+    if pca_x and pca_y:
+
+        if pca_segment is not None:
+            # Re-map PCA segment labels through cluster so old labels
+            # cannot contaminate the visualization.
+            pca_cluster = find_column(
+                pca,
+                ["cluster"],
+            )
+
+            if pca_cluster:
+                pca["display_segment"] = pd.to_numeric(
+                    pca[pca_cluster],
+                    errors="coerce",
+                ).map(CLUSTER_TO_SEGMENT)
+            else:
+                pca["display_segment"] = pca[pca_segment]
+        else:
+            pca_cluster = find_column(
+                pca,
+                ["cluster"],
+            )
+
+            if pca_cluster:
+                pca["display_segment"] = pd.to_numeric(
+                    pca[pca_cluster],
+                    errors="coerce",
+                ).map(CLUSTER_TO_SEGMENT)
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        for segment in SEGMENT_ORDER:
+            if "display_segment" not in pca.columns:
+                continue
+
+            subset = pca[
+                pca["display_segment"] == segment
+            ]
+
+            ax.scatter(
+                subset[pca_x],
+                subset[pca_y],
+                s=10,
+                alpha=0.4,
+                label=segment,
+            )
+
+        ax.set_title("PCA – User Behavioral Segments")
+        ax.set_xlabel("Principal Component 1")
+        ax.set_ylabel("Principal Component 2")
+        ax.legend()
+        ax.grid(alpha=0.2)
+
+        st.pyplot(fig)
+        plt.close(fig)
+
+    else:
+        st.warning(
+            "PCA coordinate columns were not found in pca_coordinates.csv."
+        )
+
+    st.subheader("Cluster-to-Segment Mapping")
+
+    st.dataframe(
+        mapping_df.sort_values("cluster"),
+        use_container_width=True,
+        hide_index=True,
+    )

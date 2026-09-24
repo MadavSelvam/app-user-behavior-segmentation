@@ -1,0 +1,4 @@
+Cluster 0 -> High Users
+Cluster 1 -> Low Users
+Cluster 2 -> Moderate Users
+Cluster 3 -> Occasional Users

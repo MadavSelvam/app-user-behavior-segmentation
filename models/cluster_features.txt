@@ -1,0 +1,14 @@
+days_active
+total_sessions
+avg_session_duration_min
+screen_views
+clicks
+likes
+shares
+comments
+searches
+notification_open_rate
+purchases
+total_spend
+retained_30d
+churn_risk_score
